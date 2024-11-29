@@ -7,11 +7,13 @@ import (
 	"errors"
 	"math/big"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
 
 	"github.com/ava-labs/coreth/core/vm"
+	"github.com/ava-labs/coreth/params"
 )
 
 // Define a mock structure to spy and mock values for daemon calls
@@ -78,6 +80,10 @@ func (e *DefaultEVMMock) GetBlockTime() *big.Int {
 
 func (e *DefaultEVMMock) GetGasLimit() uint64 {
 	return defaultGetGasLimit(&e.mockEVMCallerData)
+}
+
+func (e *DefaultEVMMock) GetChainID() *big.Int {
+	return params.FlareChainID
 }
 
 func (e *DefaultEVMMock) AddBalance(addr common.Address, amount *big.Int) {
@@ -156,6 +162,10 @@ func (e *BadMintReturnSizeEVMMock) GetGasLimit() uint64 {
 	return defaultGetGasLimit(&e.mockEVMCallerData)
 }
 
+func (e *BadMintReturnSizeEVMMock) GetChainID() *big.Int {
+	return params.FlareChainID
+}
+
 func (e *BadMintReturnSizeEVMMock) AddBalance(addr common.Address, amount *big.Int) {
 	defaultAddBalance(&e.mockEVMCallerData, addr, amount)
 }
@@ -209,6 +219,10 @@ func (e *BadDaemonCallEVMMock) GetBlockTime() *big.Int {
 
 func (e *BadDaemonCallEVMMock) GetGasLimit() uint64 {
 	return defaultGetGasLimit(&e.mockEVMCallerData)
+}
+
+func (e *BadDaemonCallEVMMock) GetChainID() *big.Int {
+	return params.FlareChainID
 }
 
 func (e *BadDaemonCallEVMMock) AddBalance(addr common.Address, amount *big.Int) {
@@ -302,6 +316,10 @@ func (e *ReturnNilMintRequestEVMMock) GetGasLimit() uint64 {
 	return defaultGetGasLimit(&e.mockEVMCallerData)
 }
 
+func (e *ReturnNilMintRequestEVMMock) GetChainID() *big.Int {
+	return params.FlareChainID
+}
+
 func (e *ReturnNilMintRequestEVMMock) AddBalance(addr common.Address, amount *big.Int) {
 	defaultAddBalance(&e.mockEVMCallerData, addr, amount)
 }
@@ -341,7 +359,7 @@ func TestDaemonShouldNotMintMoreThanMax(t *testing.T) {
 		if err, ok := err.(*ErrMaxMintExceeded); !ok {
 			want := &ErrMaxMintExceeded{
 				mintRequest: mintRequest,
-				mintMax:     GetMaximumMintRequest(big.NewInt(0)),
+				mintMax:     GetMaximumMintRequest(params.FlareChainID, big.NewInt(0)),
 			}
 			t.Errorf("got '%s' want '%s'", err.Error(), want.Error())
 		}
@@ -474,5 +492,51 @@ func TestDaemonShouldNotMintMoreThanLimit(t *testing.T) {
 	// AddBalance should not have been called on the state database, as the mint request was over the limit
 	if defaultEVMMock.mockEVMCallerData.addBalanceCalls != 0 {
 		t.Errorf("Add balance call count not as expected. got %d want 1", defaultEVMMock.mockEVMCallerData.addBalanceCalls)
+	}
+}
+
+func TestPrioritisedContract(t *testing.T) {
+	address := common.HexToAddress("0x123456789aBCdEF123456789aBCdef123456789A")
+	preForkTime := big.NewInt(time.Date(2024, time.March, 20, 12, 0, 0, 0, time.UTC).Unix())
+	postForkTime := big.NewInt(time.Date(2024, time.March, 27, 12, 0, 0, 0, time.UTC).Unix())
+	postPrefixForkTime := big.NewInt(time.Date(2024, time.October, 11, 0, 0, 0, 0, time.UTC).Unix())
+	initialGas := uint64(0)
+	ret0 := [32]byte{}
+	ret1 := [32]byte{}
+	ret1[31] = 1
+	data := []byte{0x01, 0x02, 0x03, 0x04, 0x05}
+
+	if IsPrioritisedContractCall(params.FlareChainID, preForkTime, &address, data, nil, initialGas) {
+		t.Errorf("Expected false for wrong address")
+	}
+	if !IsPrioritisedContractCall(params.FlareChainID, preForkTime, &prioritisedFTSOContractAddress, nil, nil, initialGas) {
+		t.Errorf("Expected true for FTSO contract")
+	}
+	if IsPrioritisedContractCall(params.FlareChainID, preForkTime, &prioritisedSubmitterContractAddress, data, ret1[:], initialGas) {
+		t.Errorf("Expected false for submitter contract before activation")
+	}
+	if !IsPrioritisedContractCall(params.FlareChainID, postForkTime, &prioritisedSubmitterContractAddress, data, ret1[:], initialGas) {
+		t.Errorf("Expected true for submitter contract after activation")
+	}
+	if IsPrioritisedContractCall(params.FlareChainID, postForkTime, &prioritisedSubmitterContractAddress, data, ret0[:], initialGas) {
+		t.Errorf("Expected false for submitter contract with wrong return value")
+	}
+	if IsPrioritisedContractCall(params.FlareChainID, postForkTime, &prioritisedSubmitterContractAddress, data, nil, initialGas) {
+		t.Errorf("Expected false for submitter contract with no return value")
+	}
+	if IsPrioritisedContractCall(params.FlareChainID, postPrefixForkTime, &prioritisedSubmitterContractAddress, data, ret1[:], initialGas) {
+		t.Errorf("Expected false for submitter contract after prefix activation with wrong data")
+	}
+	if !IsPrioritisedContractCall(params.FlareChainID, postPrefixForkTime, &prioritisedSubmitterContractAddress, []byte{0xe1, 0xb1, 0x57, 0xe7, 0x00, 0x00}, ret1[:], initialGas) {
+		t.Errorf("Expected true for submitter contract after prefix activation with correct data")
+	}
+	if IsPrioritisedContractCall(params.FlareChainID, postPrefixForkTime, &prioritisedSubmitterContractAddress, make([]byte, prioritisedCallDataCap+1), ret1[:], initialGas) {
+		t.Errorf("Expected false for submitter contract after prefix activation with too long data")
+	}
+	if IsPrioritisedContractCall(params.FlareChainID, postPrefixForkTime, &prioritisedFTSOContractAddress, data, nil, initialGas) {
+		t.Errorf("Expected false for FTSO contract after prefix activation with wrong data")
+	}
+	if !IsPrioritisedContractCall(params.FlareChainID, postPrefixForkTime, &prioritisedFTSOContractAddress, []byte{0x8f, 0xc6, 0xf6, 0x67, 0x05}, nil, initialGas) {
+		t.Errorf("Expected true for FTSO contract after prefix activation with correct data")
 	}
 }
