@@ -11,7 +11,7 @@ WORKDIR /app/avalanchego/
 
 RUN /app/avalanchego/scripts/build.sh
 
-FROM ubuntu:24.04
+FROM ubuntu:24.10
 
 WORKDIR /app
 
